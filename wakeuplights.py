@@ -1,4 +1,4 @@
-#Xiaomi yeelight bulb morning ligts/wake up ligts - Dozey
+#Xiaomi yeelight bulb morning ligts/wake up ligts. Waking sequence is set for 10 minutes. - Dozey
 import time
 import logging
 from miio import Device, DeviceException
