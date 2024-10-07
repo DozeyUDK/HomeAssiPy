@@ -1,7 +1,8 @@
+#Xiaomi yeelight bulb morning ligts/wake up ligts - Dozey
 import time
 import logging
 from miio import Device, DeviceException
-#Xiaomi yeelight bulb morning ligts/wake up ligts - Dozey
+
 
 
 logging.basicConfig(level=logging.INFO)
