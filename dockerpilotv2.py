@@ -198,7 +198,6 @@ def inspect_container(container_name):
     except Exception as e:
         console.print(f"[bold red]Nieoczekiwany błąd podczas inspekcji: {e}[/bold red]")
 
-
 def logs_container(container_name, tail=100):
     """Wyświetla ostatnie logi kontenera"""
     try:
@@ -228,34 +227,173 @@ def stats_container(container_name):
     if not container_name.strip():
         console.print("[yellow]Nie podano nazwy kontenera, wracam do menu.[/yellow]")
         return
+    
     try:
         container = client.containers.get(container_name)
-        stats = container.stats(stream=False)
-
+        
+        # Pobierz dwa pomiary z interwałem 1 sekundy dla dokładnego CPU
+        console.print(f"[cyan]Pobieranie statystyk dla {container_name}... (to może chwilę potrwać)[/cyan]")
+        
+        # Pierwszy pomiar
+        stats1 = container.stats(stream=False)
+        time.sleep(1)  # Czekamy sekundę
+        # Drugi pomiar
+        stats2 = container.stats(stream=False)
+        
+        # Obliczenie CPU na podstawie różnicy między dwoma pomiarami
         cpu_percent = 0.0
         try:
-            cpu_stats = stats['cpu_stats']
-            precpu_stats = stats.get('precpu_stats', {})
-            cpu_delta = cpu_stats['cpu_usage']['total_usage'] - precpu_stats.get('cpu_usage', {}).get('total_usage', 0)
-            system_delta = cpu_stats.get('system_cpu_usage', 0) - precpu_stats.get('system_cpu_usage', 0)
-            percpu = cpu_stats['cpu_usage'].get('percpu_usage', [])
-            if system_delta > 0.0 and cpu_delta > 0.0:
-                cpu_percent = (cpu_delta / system_delta) * len(percpu) * 100.0
-        except (KeyError, ZeroDivisionError):
+            cpu1_total = stats1['cpu_stats']['cpu_usage']['total_usage']
+            cpu1_system = stats1['cpu_stats'].get('system_cpu_usage', 0)
+            
+            cpu2_total = stats2['cpu_stats']['cpu_usage']['total_usage']
+            cpu2_system = stats2['cpu_stats'].get('system_cpu_usage', 0)
+            
+            cpu_delta = cpu2_total - cpu1_total
+            system_delta = cpu2_system - cpu1_system
+            
+            # Liczba rdzeni CPU
+            online_cpus = len(stats2['cpu_stats']['cpu_usage'].get('percpu_usage', [1]))
+            
+            if system_delta > 0 and cpu_delta >= 0:
+                cpu_percent = (cpu_delta / system_delta) * online_cpus * 100.0
+            
+        except (KeyError, ZeroDivisionError) as e:
+            console.print(f"[yellow]Błąd obliczania CPU: {e}[/yellow]")
             cpu_percent = 0.0
 
-        mem_usage = stats['memory_stats'].get('usage', 0)
-        mem_limit = stats['memory_stats'].get('limit', 1)  # unikamy dzielenia przez zero
-        mem_percent = (mem_usage / mem_limit) * 100.0 if mem_limit else 0
+        # Statystyki pamięci (używamy drugiego pomiaru)
+        mem_usage = stats2['memory_stats'].get('usage', 0)
+        mem_limit = stats2['memory_stats'].get('limit', 1)
+        mem_percent = (mem_usage / mem_limit) * 100.0 if mem_limit > 0 else 0
 
-        console.print(f"[cyan]CPU użycie: {cpu_percent:.2f} %[/cyan]")
-        console.print(f"[cyan]Pamięć: {mem_usage/(1024*1024):.2f} MB / {mem_limit/(1024*1024):.2f} MB ({mem_percent:.2f} %)[/cyan]")
+        # Statystyki sieciowe (opcjonalne)
+        network_stats = stats2.get('networks', {})
+        rx_bytes = 0
+        tx_bytes = 0
+        for interface, net_data in network_stats.items():
+            rx_bytes += net_data.get('rx_bytes', 0)
+            tx_bytes += net_data.get('tx_bytes', 0)
+
+        # Wyświetlenie wyników
+        console.print(f"\n[bold cyan]📊 Statystyki kontenera: {container_name}[/bold cyan]")
+        console.print(f"[green]🖥️  CPU użycie: {cpu_percent:.2f}%[/green]")
+        console.print(f"[blue]💾 Pamięć: {mem_usage/(1024*1024):.2f} MB / {mem_limit/(1024*1024):.2f} MB ({mem_percent:.2f}%)[/blue]")
+        
+        if rx_bytes > 0 or tx_bytes > 0:
+            console.print(f"[magenta]🌐 Sieć RX: {rx_bytes/(1024*1024):.2f} MB, TX: {tx_bytes/(1024*1024):.2f} MB[/magenta]")
+        
+        # Dodatkowe informacje o procesach (jeśli dostępne)
+        if 'pids_stats' in stats2:
+            pids = stats2['pids_stats'].get('current', 0)
+            console.print(f"[yellow]⚡ Procesy: {pids}[/yellow]")
+            
     except docker.errors.NotFound:
         console.print(f"[bold red]Nie znaleziono kontenera: {container_name}[/bold red]")
     except docker.errors.APIError as e:
         console.print(f"[bold red]Błąd API Dockera przy pobieraniu statystyk:[/bold red] {e}")
     except Exception as e:
         console.print(f"[bold red]Nieoczekiwany błąd podczas pobierania statystyk: {e}[/bold red]")
+
+def monitor_container_live(container_name, duration=30):
+    """Monitoruje kontener w czasie rzeczywistym przez określony czas"""
+    if not container_name.strip():
+        console.print("[yellow]Nie podano nazwy kontenera, wracam do menu.[/yellow]")
+        return
+    
+    try:
+        container = client.containers.get(container_name)
+        console.print(f"[cyan]Monitorowanie kontenera {container_name} przez {duration} sekund...[/cyan]")
+        console.print("[yellow]Naciśnij Ctrl+C aby zatrzymać monitorowanie[/yellow]")
+        
+        stats_stream = container.stats(stream=True)
+        start_time = time.time()
+        prev_stats = None
+        
+        for raw_stats in stats_stream:
+            current_time = time.time()
+            if current_time - start_time > duration:
+                break
+            
+            try:
+                # Konwertuj dane jeśli są w formacie bajtów
+                if isinstance(raw_stats, bytes):
+                    stats = json.loads(raw_stats.decode('utf-8'))
+                elif isinstance(raw_stats, str):
+                    stats = json.loads(raw_stats)
+                else:
+                    stats = raw_stats
+                
+                # Sprawdź czy stats to słownik
+                if not isinstance(stats, dict):
+                    console.print("[yellow]Otrzymano nieprawidłowe dane statystyk, pomijam...[/yellow]")
+                    time.sleep(1)
+                    continue
+                
+                # Oblicz CPU jeśli mamy poprzedni pomiar
+                cpu_percent = 0.0
+                if prev_stats and isinstance(prev_stats, dict):
+                    try:
+                        cpu_stats = stats.get('cpu_stats', {})
+                        prev_cpu_stats = prev_stats.get('cpu_stats', {})
+                        
+                        if 'cpu_usage' in cpu_stats and 'cpu_usage' in prev_cpu_stats:
+                            current_total = cpu_stats['cpu_usage'].get('total_usage', 0)
+                            prev_total = prev_cpu_stats['cpu_usage'].get('total_usage', 0)
+                            
+                            current_system = cpu_stats.get('system_cpu_usage', 0)
+                            prev_system = prev_cpu_stats.get('system_cpu_usage', 0)
+                            
+                            cpu_delta = current_total - prev_total
+                            system_delta = current_system - prev_system
+                            
+                            online_cpus = len(cpu_stats['cpu_usage'].get('percpu_usage', [1]))
+                            
+                            if system_delta > 0 and cpu_delta >= 0:
+                                cpu_percent = (cpu_delta / system_delta) * online_cpus * 100.0
+                    except (KeyError, ZeroDivisionError, TypeError):
+                        cpu_percent = 0.0
+                
+                # Pamięć
+                mem_usage = 0.0
+                mem_limit = 1.0
+                mem_percent = 0.0
+                
+                try:
+                    memory_stats = stats.get('memory_stats', {})
+                    mem_usage = memory_stats.get('usage', 0) / (1024*1024)
+                    mem_limit = memory_stats.get('limit', 1) / (1024*1024)
+                    mem_percent = (mem_usage / mem_limit) * 100.0 if mem_limit > 0 else 0
+                except (KeyError, TypeError, ZeroDivisionError):
+                    mem_usage = 0.0
+                    mem_limit = 1.0
+                    mem_percent = 0.0
+                
+                # Wyczyść ekran i wyświetl aktualne statystyki
+                os.system('clear' if os.name == 'posix' else 'cls')
+                console.print(f"[bold cyan]📊 Live monitoring: {container_name}[/bold cyan]")
+                console.print(f"[green]🖥️  CPU: {cpu_percent:.2f}%[/green]")
+                console.print(f"[blue]💾 RAM: {mem_usage:.1f}MB / {mem_limit:.1f}MB ({mem_percent:.1f}%)[/blue]")
+                console.print(f"[yellow]⏱️  Czas: {int(current_time - start_time)}/{duration}s[/yellow]")
+                console.print(f"[dim]Naciśnij Ctrl+C aby zatrzymać[/dim]")
+                
+                prev_stats = stats
+                
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                console.print(f"[yellow]Błąd parsowania danych: {e}[/yellow]")
+                continue
+            except Exception as e:
+                console.print(f"[yellow]Błąd w przetwarzaniu statystyk: {e}[/yellow]")
+                continue
+            
+            time.sleep(1)
+            
+    except KeyboardInterrupt:
+        console.print(f"\n[yellow]Monitorowanie przerwane przez użytkownika[/yellow]")
+    except docker.errors.NotFound:
+        console.print(f"[bold red]Nie znaleziono kontenera: {container_name}[/bold red]")
+    except Exception as e:
+        console.print(f"[bold red]Błąd podczas monitorowania: {e}[/bold red]")
 
 # --- Nowe funkcjonalności deployment ---
 
@@ -530,6 +668,7 @@ def main_menu():
         console.print("11. Pokaż logi kontenera")
         console.print("12. Wykonaj polecenie w kontenerze")
         console.print("13. Statystyki kontenera")
+        console.print("17. Live monitoring kontenera (30s)")
         console.print("[bold yellow]--- Deployment ---[/bold yellow]")
         console.print("14. Quick Deploy (build + replace)")
         console.print("15. Blue-Green Deploy")
@@ -647,6 +786,17 @@ def main_menu():
             blue_green_deploy(dockerfile_path, health_endpoint=health_endpoint)
         elif choice == "16":
             health_check_menu()
+        elif choice == "17":
+            name = input("Nazwa/ID kontenera: ").strip()
+            if not name:
+                console.print("[yellow]Nie podano nazwy kontenera, wracam do menu.[/yellow]")
+                continue
+            duration = input("Czas monitorowania w sekundach [30]: ").strip()
+            try:
+                duration = int(duration) if duration else 30
+            except ValueError:
+                duration = 30
+            monitor_container_live(name, duration)
         elif choice == "0":
             console.print("[green]Do widzenia![/green]")
             sys.exit(0)
