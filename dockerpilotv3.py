@@ -1585,6 +1585,7 @@ class DockerPilotEnhanced:
                     self.list_containers(show_all=True, format_output="table")
 
                 elif choice in ("start", "stop", "restart", "remove", "pause", "unpause"):
+                    self.list_containers()
                     name = Prompt.ask("Container name or ID")
                     kwargs = {}
                     if choice in ("stop", "restart"):
@@ -1596,6 +1597,7 @@ class DockerPilotEnhanced:
                         self.console.print(f"[red]Operation {choice} failed[/red]")
 
                 elif choice == "monitor":
+                    self.list_containers()
                     containers_input = Prompt.ask("Containers (comma separated, empty = all running)", default="").strip()
                     containers = [c.strip() for c in containers_input.split(",")] if containers_input else None
                     duration = int(Prompt.ask("Duration seconds", default="60"))
