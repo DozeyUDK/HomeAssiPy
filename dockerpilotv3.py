@@ -1012,24 +1012,26 @@ class DockerPilotEnhanced:
             
             # Health check new deployment
             health_task = progress.add_task(f"🩺 Health checking {target_name} deployment...", total=None)
-            
-            temp_port = list(temp_port_mapping.values())[0]
-            if not self._advanced_health_check(
-                temp_port, 
-                config.health_check_endpoint,
-                config.health_check_timeout,
-                config.health_check_retries
-            ):
-                progress.update(health_task, description=f"❌ {target_name.title()} health check failed")
-                # Cleanup failed deployment
-                try:
-                    target_container.stop()
-                    target_container.remove()
-                except:
-                    pass
-                return False
-            
-            progress.update(health_task, description=f"✅ {target_name.title()} health check passed")
+
+            if temp_port_mapping:
+                temp_port = list(temp_port_mapping.values())[0]
+                if not self._advanced_health_check(
+                    temp_port, 
+                    config.health_check_endpoint,
+                    config.health_check_timeout,
+                    config.health_check_retries
+                ):
+                    progress.update(health_task, description=f"❌ {target_name.title()} health check failed")
+                    try:
+                        target_container.stop()
+                        target_container.remove()
+                    except:
+                        pass
+                    return False
+                progress.update(health_task, description=f"✅ {target_name.title()} health check passed")
+            else:
+                self.logger.warning("No ports mapped for temporary deployment, skipping health check")
+                progress.update(health_task, description=f"⚠️ {target_name.title()} no ports to check")
             
             # Parallel testing phase (optional)
             if self._should_run_parallel_tests():
@@ -1505,6 +1507,60 @@ class DockerPilotEnhanced:
         history_parser = deploy_subparsers.add_parser('history', help='Show deployment history')
         history_parser.add_argument('--limit', '-l', type=int, default=10, help='Number of records to show')
         
+        # Nowe parsery dodane # 
+        # System validation
+        validate_parser = subparsers.add_parser('validate', help='Validate system requirements')
+
+        # Backup operations
+        backup_parser = subparsers.add_parser('backup', help='Backup and restore operations')
+        backup_subparsers = backup_parser.add_subparsers(dest='backup_action')
+
+        backup_create_parser = backup_subparsers.add_parser('create', help='Create deployment backup')
+        backup_create_parser.add_argument('--path', '-p', help='Backup path')
+
+        backup_restore_parser = backup_subparsers.add_parser('restore', help='Restore from backup')
+        backup_restore_parser.add_argument('backup_path', help='Path to backup directory')
+
+        # Configuration management
+        config_parser = subparsers.add_parser('config', help='Configuration management')
+        config_subparsers = config_parser.add_subparsers(dest='config_action')
+
+        config_export_parser = config_subparsers.add_parser('export', help='Export configuration')
+        config_export_parser.add_argument('--output', '-o', default='docker-pilot-config.tar.gz', help='Output archive name')
+
+        config_import_parser = config_subparsers.add_parser('import', help='Import configuration')
+        config_import_parser.add_argument('archive', help='Configuration archive path')
+
+        # CI/CD pipeline
+        pipeline_parser = subparsers.add_parser('pipeline', help='CI/CD pipeline operations')
+        pipeline_subparsers = pipeline_parser.add_subparsers(dest='pipeline_action')
+
+        pipeline_create_parser = pipeline_subparsers.add_parser('create', help='Create CI/CD pipeline')
+        pipeline_create_parser.add_argument('--type', choices=['github', 'gitlab', 'jenkins'], default='github', help='Pipeline type')
+        pipeline_create_parser.add_argument('--output', '-o', help='Output path')
+
+        # Integration tests
+        test_parser = subparsers.add_parser('test', help='Integration testing')
+        test_parser.add_argument('--config', default='integration-tests.yml', help='Test configuration file')
+
+        # Environment promotion
+        promote_parser = subparsers.add_parser('promote', help='Environment promotion')
+        promote_parser.add_argument('source', help='Source environment')
+        promote_parser.add_argument('target', help='Target environment')
+        promote_parser.add_argument('--config', help='Deployment configuration path')
+
+        # Monitoring setup
+        alerts_parser = subparsers.add_parser('alerts', help='Setup monitoring alerts')
+        alerts_parser.add_argument('--config', default='alerts.yml', help='Alert configuration file')
+
+        # Documentation
+        docs_parser = subparsers.add_parser('docs', help='Generate documentation')
+        docs_parser.add_argument('--output', '-o', default='docs', help='Output directory')
+
+        # Production checklist
+        checklist_parser = subparsers.add_parser('checklist', help='Generate production checklist')
+        checklist_parser.add_argument('--output', '-o', default='production-checklist.md', help='Output file')
+
         return parser
 
     def run_cli(self):
@@ -1525,6 +1581,37 @@ class DockerPilotEnhanced:
                 self._handle_monitor_cli(args)
             elif args.command == 'deploy':
                 self._handle_deploy_cli(args)
+            elif args.command == 'validate':
+                success = self.validate_system_requirements()
+                if not success:
+                    sys.exit(1)
+            elif args.command == 'backup':
+                self._handle_backup_cli(args)
+            elif args.command == 'config':
+                self._handle_config_cli(args)
+            elif args.command == 'pipeline':
+                self._handle_pipeline_cli(args)
+            elif args.command == 'test':
+                success = self.run_integration_tests(args.config)
+                if not success:
+                    sys.exit(1)
+            elif args.command == 'promote':
+                config_path = getattr(args, 'config', None)
+                success = self.environment_promotion(args.source, args.target, config_path)
+                if not success:
+                    sys.exit(1)
+            elif args.command == 'alerts':
+                success = self.setup_monitoring_alerts(args.config)
+                if not success:
+                    sys.exit(1)
+            elif args.command == 'docs':
+                success = self.generate_documentation(args.output)
+                if not success:
+                    sys.exit(1)
+            elif args.command == 'checklist':
+                success = self.create_production_checklist(args.output)
+                if not success:
+                    sys.exit(1)
             else:
                 parser.print_help()
         except Exception as e:
@@ -1568,12 +1655,54 @@ class DockerPilotEnhanced:
         else:
             self.console.print("[yellow]⚠️ Unknown deploy action[/yellow]")
 
+    def _handle_backup_cli(self, args):
+        """Handle backup CLI commands"""
+        if args.backup_action == 'create':
+            backup_path = getattr(args, 'path', None)
+            success = self.backup_deployment_state(backup_path)
+            if not success:
+                sys.exit(1)
+        elif args.backup_action == 'restore':
+            success = self.restore_deployment_state(args.backup_path)
+            if not success:
+                sys.exit(1)
+        else:
+            self.console.print("[yellow]⚠️ Unknown backup action[/yellow]")
+
+    def _handle_config_cli(self, args):
+        """Handle configuration CLI commands"""
+        if args.config_action == 'export':
+            success = self.export_configuration(args.output)
+            if not success:
+                sys.exit(1)
+        elif args.config_action == 'import':
+            success = self.import_configuration(args.archive)
+            if not success:
+                sys.exit(1)
+        else:
+            self.console.print("[yellow]⚠️ Unknown config action[/yellow]")
+
+    def _handle_pipeline_cli(self, args):
+        """Handle pipeline CLI commands"""
+        if args.pipeline_action == 'create':
+            success = self.create_pipeline_config(args.type, args.output)
+            if not success:
+                sys.exit(1)
+        else:
+            self.console.print("[yellow]⚠️ Unknown pipeline action[/yellow]")
+
+
     def _run_interactive_menu(self):
         """Simple interactive menu for quick operations"""
         try:
             while True:
                 choice = Prompt.ask(
-                    "\n[bold cyan]Docker Pilot - Interactive Menu[/bold cyan]\nOptions: list, start, stop, restart, remove, pause, unpause, logs, json, monitor, deploy-init, deploy-config, history, exit\nSelect",
+                    "\n[bold cyan]Docker Pilot - Interactive Menu[/bold cyan]\n"
+                    "Container: list, start, stop, restart, remove, pause, unpause, logs, json, monitor\n"
+                    "Deploy: deploy-init, deploy-config, history, promote\n"
+                    "System: validate, backup-create, backup-restore, alerts, test, pipeline, docs, checklist\n"
+                    "Config: export-config, import-config\n"
+                    "Select",
                     default="list"
                 ).strip().lower()
 
@@ -1625,6 +1754,71 @@ class DockerPilotEnhanced:
                 elif choice == "history":
                     limit = int(Prompt.ask("Number of records", default="10"))
                     self.show_deployment_history(limit=limit)
+
+                elif choice == "validate":
+                    success = self.validate_system_requirements()
+                    if not success:
+                        self.console.print("[red]System validation failed[/red]")
+
+                elif choice == "backup-create":
+                    backup_path = Prompt.ask("Backup path (empty for auto)", default="").strip()
+                    backup_path = backup_path if backup_path else None
+                    self.backup_deployment_state(backup_path)
+
+                elif choice == "backup-restore":
+                    backup_path = Prompt.ask("Backup path")
+                    success = self.restore_deployment_state(backup_path)
+                    if not success:
+                        self.console.print("[red]Restore failed[/red]")
+
+                elif choice == "export-config":
+                    output = Prompt.ask("Output archive name", default="docker-pilot-config.tar.gz")
+                    self.export_configuration(output)
+
+                elif choice == "import-config":
+                    archive = Prompt.ask("Archive path")
+                    success = self.import_configuration(archive)
+                    if not success:
+                        self.console.print("[red]Import failed[/red]")
+
+                elif choice == "pipeline":
+                    pipeline_type = Prompt.ask("Pipeline type (github/gitlab/jenkins)", default="github")
+                    output = Prompt.ask("Output path (empty for default)", default="").strip()
+                    output = output if output else None
+                    self.create_pipeline_config(pipeline_type, output)
+
+                elif choice == "test":
+                    test_config = Prompt.ask("Test config file", default="integration-tests.yml")
+                    success = self.run_integration_tests(test_config)
+                    if not success:
+                        self.console.print("[red]Integration tests failed[/red]")
+
+                elif choice == "promote":
+                    source = Prompt.ask("Source environment")
+                    target = Prompt.ask("Target environment") 
+                    config_path = Prompt.ask("Config file (empty for auto)", default="").strip()
+                    config_path = config_path if config_path else None
+                    success = self.environment_promotion(source, target, config_path)
+                    if not success:
+                        self.console.print("[red]Environment promotion failed[/red]")
+
+                elif choice == "alerts":
+                    config_path = Prompt.ask("Alert config file", default="alerts.yml")
+                    success = self.setup_monitoring_alerts(config_path)
+                    if not success:
+                        self.console.print("[red]Alert setup failed[/red]")
+
+                elif choice == "docs":
+                    output = Prompt.ask("Output directory", default="docs")
+                    success = self.generate_documentation(output)
+                    if not success:
+                        self.console.print("[red]Documentation generation failed[/red]")
+
+                elif choice == "checklist":
+                    output = Prompt.ask("Output file", default="production-checklist.md")
+                    success = self.create_production_checklist(output)
+                    if not success:
+                        self.console.print("[red]Checklist generation failed[/red]")
 
                 else:
                     self.console.print("[yellow]Unknown option, try again[/yellow]")
