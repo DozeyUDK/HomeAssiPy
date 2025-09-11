@@ -10,7 +10,6 @@ import os
 import sys
 import time
 import requests
-import threading
 import logging
 import signal
 from datetime import datetime, timedelta
@@ -20,11 +19,10 @@ from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.prompt import Prompt, Confirm
 from rich.panel import Panel
-from rich.layout import Layout
 from rich.live import Live
 from contextlib import contextmanager
 from dataclasses import dataclass, asdict
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any
 from enum import Enum
 
 # ==================== CONFIGURATION & CONSTANTS ====================
@@ -38,7 +36,7 @@ class LogLevel(Enum):
 
 @dataclass
 class DeploymentConfig:
-    """Konfiguracja deploymentu"""
+    """Deplyment config"""
     image_tag: str
     container_name: str
     port_mapping: Dict[str, str]
@@ -55,7 +53,7 @@ class DeploymentConfig:
 
 @dataclass
 class ContainerStats:
-    """Statystyki kontenera"""
+    """Container stats"""
     cpu_percent: float
     memory_usage_mb: float
     memory_limit_mb: float
@@ -94,7 +92,7 @@ class DockerPilotEnhanced:
         self.logger.info("Docker Pilot Enhanced initialized successfully")
     
     def _show_banner(self):
-        """Wyświetla banner ASCII"""
+        """gimme ASCII"""
         banner = """
     ╔══════════════════════════════════════════════════════════════════════╗
     ║                                                                      ║
@@ -121,6 +119,8 @@ class DockerPilotEnhanced:
     ║                                                                      ║
     ╚══════════════════════════════════════════════════════════════════════╝
     """
+        
+
         self.console.print(Panel(banner, title="[bold blue]Docker Managing Tool[/bold blue]", 
                                 title_align="center", border_style="blue"))
         self.console.print(f"[dim]Author: dozey | Version: Enhanced[/dim]\n")
@@ -271,6 +271,139 @@ class DockerPilotEnhanced:
             
             return containers
 
+    def list_images(self, show_all: bool = True, format_output: str = "table") -> List[Any]:
+        """Enhanced image listing with multiple output formats"""
+        with self._error_handler("list images"):
+            images = self.client.images.list(all=show_all)
+            
+            if format_output == "json":
+                image_data = []
+                for img in images:
+                    image_data.append({
+                        'id': img.id.split(":")[1][:12],
+                        'tags': img.tags,
+                        'created': img.attrs.get('Created'),
+                        'size': self._format_image_size(img.attrs.get('Size', 0)),
+                        'architecture': img.attrs.get('Architecture'),
+                        'os': img.attrs.get('Os')
+                    })
+                self.console.print_json(data=image_data)
+                return images
+            
+            # Enhanced table view
+            table = Table(title="📦 Docker Images", show_header=True, header_style="bold blue")
+            table.add_column("Nr", style="bold blue", width=4)
+            table.add_column("ID", style="cyan", width=12)
+            table.add_column("Repository", style="green", width=25)
+            table.add_column("Tag", style="yellow", width=15)
+            table.add_column("Size", style="magenta", width=12)
+            table.add_column("Created", style="bright_blue", width=20)
+            table.add_column("Used By", style="white", width=8)
+
+            for idx, img in enumerate(images, start=1):
+                # Parse repository and tag
+                if img.tags:
+                    repo_tag = img.tags[0]
+                    if ':' in repo_tag:
+                        repository, tag = repo_tag.rsplit(':', 1)
+                    else:
+                        repository, tag = repo_tag, "latest"
+                else:
+                    repository = "<none>"
+                    tag = "<none>"
+                
+                # Format size
+                size = self._format_image_size(img.attrs.get('Size', 0))
+                
+                # Format creation date
+                created = self._format_creation_date(img.attrs.get('Created'))
+                
+                # Check if image is used by containers
+                used_by = self._count_containers_using_image(img.id)
+                
+                table.add_row(
+                    str(idx),
+                    img.id.split(":")[1][:12],  # zamiast img.short_id,
+                    repository,
+                    tag,
+                    size,
+                    created,
+                    str(used_by)
+                )
+            
+            self.console.print(table)
+            
+            # Summary statistics
+            total_size = sum(img.attrs.get('Size', 0) for img in images)
+            total_size_formatted = self._format_image_size(total_size)
+            
+            summary = f"📊 Summary: {len(images)} images, {total_size_formatted} total size"
+            self.console.print(Panel(summary, style="bright_blue"))
+            
+            return images
+        
+    def remove_image(self, image_name: str, force: bool = False) -> bool:
+        """Remove Docker image"""
+        with self._error_handler("remove image", image_name):
+            try:
+                self.client.images.remove(image=image_name, force=force, noprune=False)
+                self.console.print(f"[green]✅ Image {image_name} removed successfully[/green]")
+                self.logger.info(f"Image {image_name} removed successfully")
+                return True
+            except docker.errors.ImageNotFound:
+                self.console.print(f"[bold red]Image not found: {image_name}[/bold red]")
+                return False
+            except docker.errors.APIError as e:
+                self.console.print(f"[bold red]Docker API error during image removal:[/bold red] {e}")
+                return False
+
+            
+####################################################
+    def _format_image_size(self, size_bytes: int) -> str:
+        """Format image size for display"""
+        if size_bytes == 0:
+            return "0 B"
+        
+        for unit in ['B', 'KB', 'MB', 'GB']:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
+
+    def _format_creation_date(self, created_str: str) -> str:
+        """Format creation date for display"""
+        try:
+            if created_str:
+                created = datetime.fromisoformat(created_str.replace('Z', '+00:00'))
+                now = datetime.now(created.tzinfo)
+                diff = now - created
+                
+                if diff.days > 7:
+                    return created.strftime('%Y-%m-%d')
+                elif diff.days > 0:
+                    return f"{diff.days} days ago"
+                elif diff.seconds > 3600:
+                    hours = diff.seconds // 3600
+                    return f"{hours} hours ago"
+                else:
+                    minutes = diff.seconds // 60
+                    return f"{minutes} min ago"
+        except:
+            pass
+        return "unknown"
+
+    def _count_containers_using_image(self, image_id: str) -> int:
+        """Count containers using specific image"""
+        try:
+            containers = self.client.containers.list(all=True)
+            count = 0
+            for container in containers:
+                if container.image.id == image_id:
+                    count += 1
+            return count
+        except:
+            return 0
+####################################################
     def _format_ports(self, ports: dict) -> str:
         """Format container ports for display"""
         if not ports:
@@ -325,7 +458,9 @@ class DockerPilotEnhanced:
             'restart': self._restart_container,
             'remove': self._remove_container,
             'pause': self._pause_container,
-            'unpause': self._unpause_container
+            'unpause': self._unpause_container,
+            'update_restart_policy': self.update_restart_policy,
+            'run_image': self.run_new_container
         }
         
         if operation not in operations:
@@ -347,6 +482,41 @@ class DockerPilotEnhanced:
                 progress.update(task, description=f"❌ Failed to {operation} container {container_name}")
                 self.logger.error(f"Container {operation} failed: {e}")
                 return False
+
+    ### Old functions from dockerpilotv2
+    def update_restart_policy(self, container_name: str, policy: str = 'unless-stopped') -> bool:
+        """Set restart policy on container (no, always, on-failure, unless-stopped)"""
+        try:
+            container = self.client.containers.get(container_name)
+            self.console.print(f"[cyan]Updating restart policy for container {container.name} to '{policy}'...[/cyan]")
+            container.update(restart_policy={"Name": policy})
+            self.console.print(f"[green]Restart policy set to '{policy}'[/green]")
+            return True
+        except docker.errors.NotFound:
+            self.console.print(f"[bold red]Container not found: {container_name}[/bold red]")
+            return False
+        except docker.errors.APIError as e:
+            self.console.print(f"[bold red]Docker API error during update:[/bold red] {e}")
+            return False
+
+
+    def run_new_container(self, container_name: str, **kwargs) -> bool:
+        image_name = kwargs.get('image_name')
+        name = kwargs.get('name', container_name)
+        ports = kwargs.get('ports')
+        command = kwargs.get('command')
+        try:
+            self.console.print(f"[cyan]Uruchamianie nowego kontenera {name} z obrazu {image_name}...[/cyan]")
+            self.client.containers.run(image_name, name=name, detach=True, ports=ports, command=command)
+            self.console.print(f"[green]Kontener {name} uruchomiony[/green]")
+            return True
+        except docker.errors.ImageNotFound:
+            self.console.print(f"[bold red]Nie znaleziono obrazu: {image_name}[/bold red]")
+            return False
+        except docker.errors.APIError as e:
+            self.console.print(f"[bold red]Błąd API Dockera:[/bold red] {e}")
+            return False
+
 
     def _start_container(self, container_name: str, **kwargs) -> bool:
         """Start container with enhanced validation"""
@@ -1259,6 +1429,27 @@ class DockerPilotEnhanced:
         except Exception as e:
             self.logger.error(f"Unexpected build error: {e}")
             return False
+        
+    def build_image_standalone(self, dockerfile_path: str, tag: str, no_cache: bool = False, pull: bool = True) -> bool:
+        """Standalone image building function"""
+        build_config = {
+            'dockerfile_path': dockerfile_path,
+            'context': dockerfile_path,
+            'no_cache': no_cache,
+            'pull': pull,
+            'build_args': {}
+        }
+
+        self.console.print(f"[cyan]Building image {tag} from {dockerfile_path}...[/cyan]")
+
+        success = self._build_image_enhanced(tag, build_config)
+
+        if success:
+            self.console.print(f"[green]✅ Image {tag} built successfully[/green]")
+        else:
+            self.console.print(f"[red]❌ Failed to build image {tag}[/red]")
+
+        return success
 
     def _advanced_health_check(self, port: str, endpoint: str, timeout: int, max_retries: int) -> bool:
         """Advanced health check with detailed reporting"""
@@ -1474,6 +1665,18 @@ class DockerPilotEnhanced:
         list_parser = container_subparsers.add_parser('list', help='List containers')
         list_parser.add_argument('--all', '-a', action='store_true', help='Show all containers')
         list_parser.add_argument('--format', choices=['table', 'json'], default='table')
+
+       
+        # List images
+        images_parser = container_subparsers.add_parser('list-images', help='List Docker images')
+        images_parser.add_argument('--all', '-a', action='store_true', help='Show all images')
+        images_parser.add_argument('--format', choices=['table', 'json'], default='table')
+
+        # Remove image
+        remove_img_parser = container_subparsers.add_parser('remove-image', help='Remove Docker image')
+        remove_img_parser.add_argument('name', help='Image name or ID')
+        remove_img_parser.add_argument('--force', '-f', action='store_true', help='Force removal')
+
         
         # Container actions
         for action in ['start', 'stop', 'restart', 'remove', 'pause', 'unpause']:
@@ -1557,6 +1760,13 @@ class DockerPilotEnhanced:
         docs_parser = subparsers.add_parser('docs', help='Generate documentation')
         docs_parser.add_argument('--output', '-o', default='docs', help='Output directory')
 
+        # Build operations
+        build_parser = subparsers.add_parser('build', help='Build Docker image from Dockerfile')
+        build_parser.add_argument('dockerfile_path', help='Path to Dockerfile directory')
+        build_parser.add_argument('tag', help='Image tag (e.g., myapp:latest)')
+        build_parser.add_argument('--no-cache', action='store_true', help='Build without cache')
+        build_parser.add_argument('--pull', action='store_true', default=True, help='Pull base image updates')
+
         # Production checklist
         checklist_parser = subparsers.add_parser('checklist', help='Generate production checklist')
         checklist_parser.add_argument('--output', '-o', default='production-checklist.md', help='Output file')
@@ -1573,12 +1783,16 @@ class DockerPilotEnhanced:
             self._run_interactive_menu()
             return
         
-        # Execute CLI command
+        # Execute CLI command   JAZDA Z KURWAMI
         try:
             if args.command == 'container':
                 self._handle_container_cli(args)
             elif args.command == 'monitor':
                 self._handle_monitor_cli(args)
+            elif args.command == 'update_restart_policy':
+                self.update_restart_policy(args.name, args.policy)
+            elif args.command == 'run_image':
+                self.run_image(args.image, args.name, args.ports, args.env, args.volumes, args.detach)  
             elif args.command == 'deploy':
                 self._handle_deploy_cli(args)
             elif args.command == 'validate':
@@ -1612,6 +1826,10 @@ class DockerPilotEnhanced:
                 success = self.create_production_checklist(args.output)
                 if not success:
                     sys.exit(1)
+            elif args.command == 'build':
+                success = self.build_image_standalone(args.dockerfile_path, args.tag, args.no_cache, args.pull)
+            if not success:
+                    sys.exit(1)
             else:
                 parser.print_help()
         except Exception as e:
@@ -1629,8 +1847,20 @@ class DockerPilotEnhanced:
                 kwargs['timeout'] = args.timeout
             if hasattr(args, 'force'):
                 kwargs['force'] = args.force
-            
             success = self.container_operation(args.container_action, args.name, **kwargs)
+            if not success:
+                sys.exit(1)
+        elif args.container_action == 'run_image':
+            # This would need CLI parser setup for run_image - currently only supports interactive mode
+            self.console.print("[yellow]run_image is only available in interactive mode[/yellow]")
+        elif args.container_action == 'list-images':
+            self.list_images(show_all=args.all, format_output=args.format)
+        elif args.container_action == 'remove-image':
+            success = self.remove_image(args.name, args.force)
+            if not success:
+                sys.exit(1)
+        elif args.container_action == 'remove-image':
+            success = self.remove_image(args.name, args.force)
             if not success:
                 sys.exit(1)
 
@@ -1698,9 +1928,9 @@ class DockerPilotEnhanced:
             while True:
                 choice = Prompt.ask(
                     "\n[bold cyan]Docker Pilot - Interactive Menu[/bold cyan]\n"
-                    "Container: list, start, stop, restart, remove, pause, unpause, logs, json, monitor\n"
+                    "Container: list, list-img, start, stop, restart, remove, pause, unpause, policy, run_image, logs, remove-image, json, monitor, build\n"
                     "Deploy: deploy-init, deploy-config, history, promote\n"
-                    "System: validate, backup-create, backup-restore, alerts, test, pipeline, docs, checklist\n"
+                    "System: validate, backup-create, backup-restore, alerts,  test, pipeline, docs, checklist\n"
                     "Config: export-config, import-config\n"
                     "Select",
                     default="list"
@@ -1712,6 +1942,9 @@ class DockerPilotEnhanced:
 
                 if choice == "list":
                     self.list_containers(show_all=True, format_output="table")
+
+                elif choice == "list-img":
+                    self.list_images(show_all=True, format_output="table")
 
                 elif choice in ("start", "stop", "restart", "remove", "pause", "unpause"):
                     self.list_containers()
@@ -1732,6 +1965,42 @@ class DockerPilotEnhanced:
                     duration = int(Prompt.ask("Duration seconds", default="60"))
                     self.monitor_containers_dashboard(containers, duration)
 
+                elif choice == "run_image":
+                    image_name = Prompt.ask("Image name (e.g., nginx:latest)")
+                    container_name = Prompt.ask("Container name")
+                    ports_input = Prompt.ask("Port mapping (format: host:container, e.g., 8080:80, empty for none)", default="").strip()
+                    
+                    # Parse port mapping
+                    ports = {}
+                    if ports_input:
+                        try:
+                            host_port, container_port = ports_input.split(":")
+                            ports = {container_port: host_port}
+                        except ValueError:
+                            self.console.print("[red]Invalid port format. Use host:container (e.g., 8080:80)[/red]")
+                            continue
+                    
+                    # Optional command
+                    command = Prompt.ask("Command to run (empty for default)", default="").strip()
+                    command = command if command else None
+                    
+                    success = self.container_operation('run_image', container_name, 
+                                                       image_name=image_name, 
+                                                       name=container_name,
+                                                       ports=ports, 
+                                                       command=command)
+                    if not success:
+                        self.console.print("[red]Failed to run container[/red]")
+                
+                elif choice == "build":
+                    dockerfile_path = Prompt.ask("Dockerfile path", default=".")
+                    image_tag = Prompt.ask("Image tag (e.g., myapp:latest)")
+                    no_cache = Confirm.ask("Build without cache?", default=False)
+                    pull = Confirm.ask("Pull base image updates?", default=True)
+                    success = self.build_image_standalone(dockerfile_path, image_tag, no_cache, pull)
+                    if not success:
+                        self.console.print("[red]Image build failed[/red]")
+
                 elif choice == "json":
                     self.list_containers()
                     container_name = Prompt.ask("Container name or ID")
@@ -1739,6 +2008,15 @@ class DockerPilotEnhanced:
 
                 elif choice == "logs":
                     self.view_container_logs()
+
+                
+                elif choice == "remove-image":
+                    self.list_images()
+                    image_name = Prompt.ask("Image name or ID to remove")
+                    force = Confirm.ask("Force removal?", default=False)
+                    success = self.remove_image(image_name, force)
+                    if not success:
+                        self.console.print("[red]Failed to remove image[/red]")
 
                 elif choice == "deploy-init":
                     output = Prompt.ask("Output file", default="deployment.yml")
@@ -1807,6 +2085,14 @@ class DockerPilotEnhanced:
                     success = self.setup_monitoring_alerts(config_path)
                     if not success:
                         self.console.print("[red]Alert setup failed[/red]")
+
+                elif choice == "policy":
+                    self.list_containers()
+                    name = Prompt.ask("Container name or ID")
+                    policy = Prompt.ask("Restart policy (no/on-failure/always/unless-stopped)", default="always")
+                    success = self.update_restart_policy(name, policy)
+                    if not success:
+                        self.console.print("[red]Failed to update restart policy[/red]")
 
                 elif choice == "docs":
                     output = Prompt.ask("Output directory", default="docs")
@@ -3226,6 +3512,11 @@ python dockerpilotv3.py --log-level DEBUG container list
         except Exception as e:
             self.logger.error(f"Configuration import failed: {e}")
             return False
+        
+
+def check_all_requirements():
+    pilot = DockerPilotEnhanced()
+    return pilot.validate_system_requirements()
 
 if __name__ == "__main__":
     # Minimal bootstrap to honor --config and --log-level before launching CLI
