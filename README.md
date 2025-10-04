@@ -18,27 +18,3 @@ git clone https://github.com/DozeyUDK/HomeAssiPy.git
 cd HomeAssiPy
 
 
-
-
-
-
-# HomeAssiPy / Sterowanie światłami
-
-## Polski
-
-Repozytorium zawiera jeden skrypt w Pythonie do sterowania światłami:
-
-- `wakeuplights.py` – sterowanie światłami.
-
-### Wymagania
-
-- Python 3.10+  
-- Biblioteki z `requirements.txt`
-
-### Instalacja
-
-1. Sklonuj repozytorium:
-
-```bash
-git clone https://github.com/DozeyUDK/HomeAssiPy.git
-cd HomeAssiPy
