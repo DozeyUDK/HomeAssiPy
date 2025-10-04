@@ -1,4 +1,1 @@
-docker
-requests
-rich
-PyYAML
+miio>=0.6.7
